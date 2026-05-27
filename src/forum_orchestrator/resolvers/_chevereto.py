@@ -22,8 +22,10 @@ from .base import ResolveContext, basename_from_url, guess_kind
 
 
 def _strip_thumb(u: str) -> str:
-    """``foo.md.jpg`` / ``foo.th.jpg`` -> ``foo.jpg``."""
-    return re.sub(r"\.(md|th)\.(jpe?g|png|gif|webp)$", r".\2", u, flags=re.I)
+    """``foo.md.jpg`` / ``foo.th.jpg`` -> ``foo.jpg``. Preserves query string."""
+    base, sep, query = u.partition("?")
+    stripped = re.sub(r"\.(md|th)\.(jpe?g|png|gif|webp)$", r".\2", base, flags=re.I)
+    return stripped + (sep + query if sep else "")
 
 
 async def resolve_image_page(url: str, ctx: ResolveContext) -> list[Resource]:

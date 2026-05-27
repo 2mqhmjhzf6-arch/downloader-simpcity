@@ -13,11 +13,12 @@ forum should parse.
 
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Optional
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from selectolax.parser import HTMLParser
 
@@ -25,6 +26,38 @@ from ..http_client import HttpClient
 from ..models import Post, PostLink, Thread
 
 _THREAD_ID_RX = re.compile(r"/threads/[^/]+\.(\d+)", re.IGNORECASE)
+
+_REDIRECT_HOST = re.compile(r"^https?://(?:[\w-]+\.)?simpcity\.\w+/redirect/", re.IGNORECASE)
+
+_UI_ASSET = re.compile(
+    r"(?:/assets/|/static/|/favicon|"
+    r"dash\.bunkr\.|/icon[\w.-]*\.(?:svg|png|ico)|"
+    r"twemoji[@/]|/emoji[/.]|/sprite\.)",
+    re.IGNORECASE,
+)
+
+
+def _unwrap_redirect(url: str) -> str:
+    """Decode `simpcity.cr/redirect/?to=<base64>&...` envelopes."""
+    if not _REDIRECT_HOST.match(url):
+        return url
+    q = parse_qs(urlparse(url).query)
+    raw = (q.get("to") or [""])[0]
+    if not raw:
+        return url
+    padded = raw + "=" * (-len(raw) % 4)
+    for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            decoded = decoder(padded).decode("utf-8", "replace")
+        except Exception:
+            continue
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    return url
+
+
+def _is_ui_asset(url: str) -> bool:
+    return bool(_UI_ASSET.search(url))
 
 
 def parse_thread_id(url: str) -> str:
@@ -83,6 +116,9 @@ class ThreadScraper:
                 v = node.attributes.get(attr)
                 if v:
                     abs_url = urljoin(forum_origin, v)
+                    abs_url = _unwrap_redirect(abs_url)
+                    if _is_ui_asset(abs_url):
+                        break
                     urls.append(abs_url)
                     break  # one URL per element
         return [PostLink(url=u, post=post) for u in _dedup_preserve(urls)]

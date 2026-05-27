@@ -21,7 +21,9 @@ _HOST = r"(?:simp\d+\.)?(?:cuckcapital\.cr|jpe?g\d?\.(?:church|fish|fishing|pet|
 @register
 class JpgSu(Resolver):
     name = "jpgsu"
-    patterns = [rf"{_HOST}/img/", rf"{_HOST}/(?:[^/]+\.)?(?:jpe?g|png|gif|webp)"]
+    # Match any URL on a chevereto host (image, CDN-direct, album).
+    # Album dispatch is handled inside _chevereto.resolve_chevereto.
+    patterns = [rf"{_HOST}/"]
     album_patterns = [rf"{_HOST}/(?:a|album)/"]
 
     async def resolve(self, url: str, ctx: ResolveContext) -> list[Resource]:

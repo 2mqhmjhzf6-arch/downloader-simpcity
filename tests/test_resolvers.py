@@ -350,3 +350,129 @@ async def test_anonfiles_tombstone():
     from forum_orchestrator.resolvers.anonfiles import AnonFiles
     with pytest.raises(DeadLink):
         await AnonFiles().resolve("https://anonfiles.com/abc", _ctx())
+
+
+# ---------------------------------------------------------------------------
+# chevereto thumb stripping (covers F4)
+# ---------------------------------------------------------------------------
+
+
+async def test_chevereto_cdn_strips_thumb_via_jpgsu():
+    """A direct CDN URL with a .md.jpg suffix routes through JpgSu and is
+    rewritten back to the full-size image."""
+    url = "https://simp1.cuckcapital.cr/images/2024/05/01/foo.md.jpg"
+    out = await JpgSu().resolve(url, _ctx())
+    assert len(out) == 1
+    assert out[0].url == "https://simp1.cuckcapital.cr/images/2024/05/01/foo.jpg"
+
+
+async def test_chevereto_strip_preserves_query():
+    from forum_orchestrator.resolvers._chevereto import _strip_thumb
+    assert _strip_thumb("https://x/foo.md.jpg?cb=1") == "https://x/foo.jpg?cb=1"
+    assert _strip_thumb("https://x/foo.th.png") == "https://x/foo.png"
+    assert _strip_thumb("https://x/foo.png") == "https://x/foo.png"
+
+
+# ---------------------------------------------------------------------------
+# bunkr — CDN-direct routes via file-page, __NEXT_DATA__ parsing
+# ---------------------------------------------------------------------------
+
+
+async def test_bunkr_cdn_direct_routes_to_file_page():
+    """A naked CDN URL should be re-routed through bunkr.cr/v/<basename> so we
+    pick up the real (rotated) CDN target + correct Referer."""
+    file_page = (
+        '<html><head><title>1-341_Pandora-xqlYb9K0.mp4 | Bunkr</title></head>'
+        '<body><a class="ic-download-01-svg" '
+        'href="https://cdn7.bunkr.ru/1-341_Pandora-xqlYb9K0.mp4">dl</a>'
+        '</body></html>'
+    )
+    ctx = _ctx({"https://bunkr.cr/v/1-341_Pandora-xqlYb9K0.mp4": file_page})
+    out = await Bunkr().resolve(
+        "https://cdn3.bunkr.ru/1-341_Pandora-xqlYb9K0.mp4", ctx,
+    )
+    assert len(out) == 1
+    assert out[0].url == "https://cdn7.bunkr.ru/1-341_Pandora-xqlYb9K0.mp4"
+    assert out[0].referer == "https://bunkr.cr/"
+
+
+async def test_bunkr_single_via_next_data():
+    next_data = {
+        "props": {"pageProps": {"file": {
+            "name": "Pandora-Best.mp4",
+            "cdn": "https://cdn9.bunkr.ru",
+            "size": 42,
+            "type": "video",
+        }}}
+    }
+    html = (
+        '<html><head><title>Pandora-Best.mp4 | Bunkr</title></head>'
+        '<body><script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(next_data) + '</script></body></html>'
+    )
+    ctx = _ctx({"https://bunkr.cr/v/abc": html})
+    out = await Bunkr().resolve("https://bunkr.cr/v/abc", ctx)
+    assert len(out) == 1
+    assert out[0].filename == "Pandora-Best.mp4"
+    assert out[0].url == "https://cdn9.bunkr.ru/Pandora-Best.mp4"
+    assert out[0].kind == Kind.VIDEO
+    assert out[0].referer == "https://bunkr.cr/"
+
+
+async def test_bunkr_album_via_next_data():
+    file1_data = {"props": {"pageProps": {"file": {
+        "name": "one.mp4", "cdn": "https://cdn1.bunkr.ru", "size": 1, "type": "video",
+    }}}}
+    file2_data = {"props": {"pageProps": {"file": {
+        "name": "two.jpg", "cdn": "https://cdn2.bunkr.ru", "size": 2, "type": "image",
+    }}}}
+    album_data = {"props": {"pageProps": {"album": {"files": [
+        {"slug": "ONE_slug", "name": "one.mp4", "size": 1, "type": "video"},
+        {"slug": "TWO_slug", "name": "two.jpg", "size": 2, "type": "image"},
+    ]}}}}
+    album_html = (
+        '<html><body><script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(album_data) + '</script></body></html>'
+    )
+    file1_html = (
+        '<html><head><title>one.mp4 | Bunkr</title></head><body>'
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(file1_data) + '</script></body></html>'
+    )
+    file2_html = (
+        '<html><head><title>two.jpg | Bunkr</title></head><body>'
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(file2_data) + '</script></body></html>'
+    )
+    ctx = _ctx({
+        "https://bunkr.cr/a/MyAlbum": album_html,
+        "https://bunkr.cr/v/ONE_slug": file1_html,
+        "https://bunkr.cr/f/TWO_slug": file2_html,
+    })
+    out = await Bunkr().resolve("https://bunkr.cr/a/MyAlbum", ctx)
+    assert {r.filename for r in out} == {"one.mp4", "two.jpg"}
+    assert {r.url for r in out} == {
+        "https://cdn1.bunkr.ru/one.mp4",
+        "https://cdn2.bunkr.ru/two.jpg",
+    }
+
+
+# ---------------------------------------------------------------------------
+# turbo — JS-driven embed page
+# ---------------------------------------------------------------------------
+
+
+async def test_turbo_embed_inline_json():
+    from forum_orchestrator.resolvers.turbo import Turbo
+    html = (
+        '<html><head><title>gg5WwANtZ9B | Turbo</title></head>'
+        '<body><script>'
+        'var sources = [{ "src": "https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4",'
+        ' "type": "video/mp4" }];'
+        '</script></body></html>'
+    )
+    ctx = _ctx({"https://turbo.cr/embed/gg5WwANtZ9B": html})
+    out = await Turbo().resolve("https://turbo.cr/embed/gg5WwANtZ9B", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4"
+    assert out[0].kind == Kind.VIDEO

@@ -119,3 +119,77 @@ async def test_unsupported_host_written_to_tracking_file(tmp_path: Path, monkeyp
     assert tracking, list(tmp_path.rglob("*"))
     content = tracking[0].read_text()
     assert "coomer.st" in content
+
+
+async def test_empty_resolve_records_failure(tmp_path: Path, monkeypatch):
+    """If a resolver returns [] for a non-album URL, the URL must show up in
+    failed_downloads.txt — no silent drops."""
+    # Bunkr file-page URL whose _resolve_single will get back an HTML page
+    # with no findable CDN URL → returns [].
+    thread_html = """<html><body>
+      <div class="block-container">
+      <article id="post-1" class="message" data-content="post-1">
+        <ul class="message-attribution-main"><li><time datetime="2024-01-01T00:00:00+0000">jan 1</time></li></ul>
+        <article class="message-body">
+          <div class="bbWrapper">
+            <a href="https://bunkr.cr/v/empty-file.mp4">link</a>
+          </div>
+        </article>
+      </article>
+      </div>
+    </body></html>"""
+
+    fake = _FakeHttp(
+        {
+            "https://simpcity.cr/threads/x.42/page-1": thread_html,
+            # Page that has no recognisable CDN URL anywhere.
+            "https://bunkr.cr/v/empty-file.mp4": "<html><body>nothing here</body></html>",
+        },
+        {},
+    )
+    cfg = Config(out_dir=tmp_path, dry_run=True, concurrency=2, use_curl_cffi=False)
+    monkeypatch.setattr(
+        "forum_orchestrator.orchestrator.HttpClient",
+        lambda **kw: fake,
+    )
+    await Orchestrator(cfg).run("https://simpcity.cr/threads/x.42/")
+
+    failed = list(tmp_path.rglob("_meta/failed_downloads.txt"))
+    assert failed, list(tmp_path.rglob("*"))
+    content = failed[0].read_text()
+    assert "https://bunkr.cr/v/empty-file.mp4" in content
+    assert "returned no resources" in content
+
+
+async def test_empty_resolve_album_url_is_silent(tmp_path: Path, monkeypatch):
+    """Album URLs are allowed to return [] (empty albums) — don't spam logs."""
+    thread_html = """<html><body>
+      <div class="block-container">
+      <article id="post-1" class="message" data-content="post-1">
+        <ul class="message-attribution-main"><li><time datetime="2024-01-01T00:00:00+0000">jan 1</time></li></ul>
+        <article class="message-body">
+          <div class="bbWrapper">
+            <a href="https://bunkr.cr/a/EmptyAlbum">link</a>
+          </div>
+        </article>
+      </article>
+      </div>
+    </body></html>"""
+
+    fake = _FakeHttp(
+        {
+            "https://simpcity.cr/threads/y.99/page-1": thread_html,
+            "https://bunkr.cr/a/EmptyAlbum": "<html><body>empty</body></html>",
+        },
+        {},
+    )
+    cfg = Config(out_dir=tmp_path, dry_run=True, concurrency=2, use_curl_cffi=False)
+    monkeypatch.setattr(
+        "forum_orchestrator.orchestrator.HttpClient",
+        lambda **kw: fake,
+    )
+    await Orchestrator(cfg).run("https://simpcity.cr/threads/y.99/")
+
+    failed = list(tmp_path.rglob("_meta/failed_downloads.txt"))
+    # Album emptiness should NOT produce a failed_downloads entry.
+    assert not failed, [f.read_text() for f in failed]

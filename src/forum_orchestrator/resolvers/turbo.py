@@ -55,9 +55,16 @@ class Turbo(Resolver):
                 if direct:
                     break
         if direct is None:
-            m = re.search(r'"(?:url|src|file)"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"', html)
-            if m:
-                direct = m.group(1).encode().decode("unicode_escape")
+            for rx in (
+                r'sources?\s*[:=]\s*\[?\s*\{[^}]*?"(?:src|file|url)"\s*:\s*"([^"]+)"',
+                r'"(?:src|file|url|sd_url|hd_url|video_url|stream_url)"\s*:\s*"(https?://[^"]+\.(?:mp4|m3u8)[^"]*)"',
+                r'<source[^>]+src=["\']([^"\']+)',
+                r'(https?://[^\s"\'<>]+\.(?:mp4|m3u8)(?:\?[^\s"\'<>]*)?)',
+            ):
+                m = re.search(rx, html)
+                if m:
+                    direct = m.group(1).encode().decode("unicode_escape")
+                    break
         if not direct:
             return []
         direct = urljoin(url, direct)
