@@ -1,0 +1,7 @@
+{
+  "id": "LIST123",
+  "files": [
+    {"id": "FILE1", "name": "first.jpg"},
+    {"id": "FILE2", "name": "second.mp4"}
+  ]
+}

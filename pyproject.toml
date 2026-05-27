@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forum-orchestrator"
+version = "0.1.0"
+description = "Scrape, resolve and download media from XenForo forum threads (SimpCity-flavoured)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "WTFPL" }
+authors = [{ name = "forum-orchestrator contributors" }]
+dependencies = [
+    "httpx[http2]>=0.27",
+    "anyio>=4.3",
+    "selectolax>=0.3.21",
+    "typer>=0.12",
+    "rich>=13.7",
+    "platformdirs>=4.2",
+    "browser-cookie3>=0.19",
+    "pydantic>=2.6",
+    "yarl>=1.9",
+]
+
+[project.optional-dependencies]
+cf = ["curl-cffi>=0.7"]
+dev  = ["pytest>=8", "pytest-anyio>=0.0.0", "pytest-asyncio>=0.23", "respx>=0.21", "ruff>=0.5"]
+
+[project.scripts]
+forum-orchestrator = "forum_orchestrator.cli:app"
+fmo = "forum_orchestrator.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "live: hits the real internet; skipped unless --live is passed",
+]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
