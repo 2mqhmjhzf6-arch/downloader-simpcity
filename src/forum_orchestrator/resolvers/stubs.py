@@ -37,18 +37,12 @@ def _stub(name: str, patterns: list[str], album_patterns: list[str] | None = Non
     return cls
 
 
-Cyberfile  = _stub("cyberfile",  [r"cyberfile\.(su|me)/\w+"], [r"cyberfile\.(su|me)/folder/"])
-Saint      = _stub("saint",      [r"saint2\.(su|cr)/"])
-Turbo      = _stub("turbo",      [r"(?:[\w-]+\.)?turbo\.cr/(?:embed|v|d)/"], [r"(?:[\w-]+\.)?turbo\.cr/a/"])
-Filester   = _stub("filester",   [r"filester\.(me|sh|si|gg)/d/"], [r"filester\.(me|sh|si|gg)/f/"])
-GoFile     = _stub("gofile",     [r"gofile\.io/d"])
 Coomer     = _stub("coomer",     [r"coomer\.st/[\w.-]+/user"])
 Kemono     = _stub("kemono",     [r"\.kemono\.cr/data/"])
 Postimg    = _stub("postimg",    [r"i?postimg\.cc/"])
 Pixxxels   = _stub("pixxxels",   [r"pixxxels\.cc/"])
 Imagevenue = _stub("imagevenue", [r"imagevenue\.com/"])
 Imagebam   = _stub("imagebam",   [r"images\d+\.imagebam\.com/"], [r"imagebam\.com/(view|gallery)/"])
-Ibb        = _stub("ibb",        [r"(?:[a-z]\d*\.)?ibb\.co/"], [r"ibb\.co/album/"])
 Imgvb      = _stub("imgvb",      [r"imgvb\.com/images/"], [r"imgvb\.com/album"])
 Pomf       = _stub("pomf",       [r"pomf2\.lain\.la/"])
 Pornhub    = _stub("pornhub",    [r"pornhub\.com/view_video"])

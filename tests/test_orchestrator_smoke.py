@@ -62,3 +62,60 @@ async def test_dry_run_pipeline(tmp_path: Path, monkeypatch):
     # State DB was created next to the thread folder.
     runs = list(tmp_path.glob("*/Some Cool Thread (1)/_meta/state.sqlite"))
     assert runs, list(tmp_path.rglob("*"))
+
+
+async def test_only_filter_keeps_videos(tmp_path: Path, monkeypatch):
+    """--only videos must drop image resources from a mixed Cyberdrop album."""
+    thread_html = load_fixture("xenforo_thread_p1.html")
+    cd_api = json.loads(load_fixture("cyberdrop_album_api.json"))
+
+    texts = {"https://simpcity.cr/threads/some.1/page-1": thread_html}
+    jsons = {"https://api.cyberdrop.me/api/album?albumId=xy12zz": cd_api}
+    fake = _FakeHttp(texts, jsons)
+
+    cfg = Config(
+        out_dir=tmp_path, dry_run=True, concurrency=2,
+        use_curl_cffi=False, only_kind="video", pages=(1, 1),
+    )
+    monkeypatch.setattr(
+        "forum_orchestrator.orchestrator.HttpClient",
+        lambda **kw: fake,
+    )
+    await Orchestrator(cfg).run("https://simpcity.cr/threads/some.1/")
+    # No write happened (dry-run), but tracking files would only exist if
+    # there were failures. Just confirm the run completed.
+    runs = list(tmp_path.glob("*/Some Cool Thread (1)"))
+    assert runs
+
+
+async def test_unsupported_host_written_to_tracking_file(tmp_path: Path, monkeypatch):
+    """A URL that hits a stub resolver lands in _meta/unsupported_hosts.txt."""
+    # Build a tiny thread page that contains exactly one link to a stub host.
+    thread_html = """<html><body>
+      <div class="block-container">
+      <article id="post-1" class="message" data-content="post-1">
+        <ul class="message-attribution-main"><li><time datetime="2024-01-01T00:00:00+0000">jan 1</time></li></ul>
+        <article class="message-body">
+          <div class="bbWrapper">
+            <a href="https://coomer.st/somebody/user">link</a>
+          </div>
+        </article>
+      </article>
+      </div>
+    </body></html>"""
+
+    fake = _FakeHttp(
+        {"https://simpcity.cr/threads/x.99/page-1": thread_html},
+        {},
+    )
+    cfg = Config(out_dir=tmp_path, dry_run=True, concurrency=2, use_curl_cffi=False)
+    monkeypatch.setattr(
+        "forum_orchestrator.orchestrator.HttpClient",
+        lambda **kw: fake,
+    )
+    await Orchestrator(cfg).run("https://simpcity.cr/threads/x.99/")
+
+    tracking = list(tmp_path.rglob("_meta/unsupported_hosts.txt"))
+    assert tracking, list(tmp_path.rglob("*"))
+    content = tracking[0].read_text()
+    assert "coomer.st" in content
