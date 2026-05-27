@@ -1,0 +1,7 @@
+{
+  "name": "Cool Album",
+  "files": [
+    {"url": "https://fs-01.cyberdrop.me/album/IMG_001.jpg", "name": "IMG_001.jpg"},
+    {"url": "https://fs-01.cyberdrop.me/album/clip.mp4",    "name": "clip.mp4"}
+  ]
+}
