@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass(slots=True)
@@ -27,3 +27,5 @@ class Config:
     retries: int = 4
     timeout_s: float = 30.0
     passwords: list[str] = field(default_factory=list)
+    only_kind: Literal["video", "photo", "both"] = "both"
+    quiet: bool = False

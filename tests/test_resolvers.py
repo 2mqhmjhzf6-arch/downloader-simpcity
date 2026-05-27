@@ -25,10 +25,14 @@ from forum_orchestrator.resolvers.redgifs import RedGifs
 from tests.conftest import load_fixture
 
 
-def _ctx(text_map: dict[str, str] | None = None, json_map: dict[str, Any] | None = None):
+def _ctx(text_map: dict[str, str] | None = None,
+         json_map: dict[str, Any] | None = None,
+         post_map: dict[str, Any] | None = None):
     http = AsyncMock()
     http.get_text = AsyncMock(side_effect=lambda u, **kw: (text_map or {}).get(u, ""))
     http.get_json = AsyncMock(side_effect=lambda u, **kw: (json_map or {}).get(u, {}))
+    http.post_json = AsyncMock(side_effect=lambda u, **kw: (post_map or {}).get(u, {}))
+    http.request = AsyncMock(return_value=None)
     return ResolveContext(http=http)
 
 
@@ -176,15 +180,16 @@ async def test_imgbox_thumb_rewrite():
 
 
 @pytest.mark.parametrize("url", [
-    "https://gofile.io/d/abc",
-    "https://saint2.su/embed/x",
-    "https://cyberfile.su/abc",
-    "https://turbo.cr/v/x",
+    "https://coomer.st/somebody/user",
+    "https://i.kemono.cr/data/abc",
+    "https://postimg.cc/abc",
+    "https://pornhub.com/view_video?v=xyz",
+    "https://rule34.xxx/index?id=1",
 ])
 async def test_stubs_raise(url):
     from forum_orchestrator.errors import UnsupportedHost
     cls = find_resolver(url)
-    assert cls is not None
+    assert cls is not None, url
     with pytest.raises(UnsupportedHost):
         await cls().resolve(url, _ctx())
 
@@ -197,3 +202,151 @@ async def test_stubs_raise(url):
 def test_every_resolver_has_a_pattern():
     for cls in all_resolvers():
         assert cls.patterns or cls.album_patterns, cls.name
+
+
+# ---------------------------------------------------------------------------
+# new resolvers
+# ---------------------------------------------------------------------------
+
+
+def test_new_resolvers_routed():
+    cases = {
+        "https://ibb.co/AbCdEf":             "ibb",
+        "https://ibb.co/album/aBcDeF":       "ibb",
+        "https://pixl.is/img/foo":           "pixl",
+        "https://pixl.li/album/bar":         "pixl",
+        "https://saint2.su/embed/abc":       "saint",
+        "https://saint2.cr/a/xyz":           "saint",
+        "https://turbo.cr/v/foo":            "turbo",
+        "https://turbo.cr/a/foo":            "turbo",
+        "https://cyberfile.su/AbCd123":      "cyberfile",
+        "https://cyberfile.me/folder/zzz":   "cyberfile",
+        "https://filester.me/d/abc":         "filester",
+        "https://filester.gg/f/zzz":         "filester",
+        "https://gofile.io/d/AbCd":          "gofile",
+        "https://anonfiles.com/abc":         "anonfiles",
+    }
+    for url, expected in cases.items():
+        cls = find_resolver(url)
+        assert cls is not None, url
+        assert cls.name == expected, f"{url} -> {cls.name}"
+
+
+async def test_ibb_single():
+    from forum_orchestrator.resolvers.ibb import Ibb
+    html = load_fixture("ibb_image.html")
+    ctx = _ctx({"https://ibb.co/AbCdEf": html})
+    out = await Ibb().resolve("https://ibb.co/AbCdEf", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://i.ibb.co/abcdef/my-photo.jpg"
+    assert out[0].kind == Kind.IMAGE
+
+
+async def test_ibb_direct_cdn_passthrough():
+    from forum_orchestrator.resolvers.ibb import Ibb
+    out = await Ibb().resolve("https://i.ibb.co/abc/foo.png", _ctx())
+    assert out[0].url == "https://i.ibb.co/abc/foo.png"
+    assert out[0].kind == Kind.IMAGE
+
+
+async def test_ibb_album():
+    from forum_orchestrator.resolvers.ibb import Ibb
+    album = load_fixture("ibb_album.html")
+    image = load_fixture("ibb_image.html")
+    ctx = _ctx({
+        "https://ibb.co/album/zzz": album,
+        "https://ibb.co/img1": image,
+        "https://ibb.co/img2": image,
+    })
+    out = await Ibb().resolve("https://ibb.co/album/zzz", ctx)
+    assert len(out) == 2
+
+
+async def test_pixl_image_via_chevereto():
+    from forum_orchestrator.resolvers.pixl import Pixl
+    html = load_fixture("pixl_image.html")
+    ctx = _ctx({"https://pixl.is/img/file123": html})
+    out = await Pixl().resolve("https://pixl.is/img/file123", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://pixl.is/i/foo/file123.jpg"
+
+
+async def test_saint_single():
+    from forum_orchestrator.resolvers.saint2 import Saint
+    html = load_fixture("saint_single.html")
+    ctx = _ctx({"https://saint2.su/embed/abc": html})
+    out = await Saint().resolve("https://saint2.su/embed/abc", ctx)
+    assert len(out) == 1
+    assert out[0].kind == Kind.VIDEO
+    assert out[0].url == "https://cdn.saint2.su/videos/abc/My_Cool_Clip.mp4"
+    assert "My Cool Clip" in (out[0].filename or "")
+
+
+async def test_turbo_single():
+    from forum_orchestrator.resolvers.turbo import Turbo
+    html = load_fixture("turbo_single.html")
+    ctx = _ctx({"https://turbo.cr/v/sample": html})
+    out = await Turbo().resolve("https://turbo.cr/v/sample", ctx)
+    assert len(out) == 1
+    assert out[0].kind == Kind.VIDEO
+    assert out[0].url == "https://cdn.turbo.cr/v/sample.mp4"
+
+
+async def test_filester_single():
+    from forum_orchestrator.resolvers.filester import Filester
+    html = load_fixture("filester_single.html")
+    ctx = _ctx({"https://filester.me/d/abc": html})
+    out = await Filester().resolve("https://filester.me/d/abc", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://cdn.filester.me/dl/abc/archive.zip"
+    assert out[0].filename == "archive.zip"
+
+
+async def test_cyberfile_single():
+    from forum_orchestrator.resolvers.cyberfile import Cyberfile
+    page = load_fixture("cyberfile_single.html")
+    text_map = {"https://cyberfile.su/AbCd123": page}
+    post_map = {
+        "https://cyberfile.su/account/ajax/file_details": {
+            "html": 'var openUrl = "https://files.cyberfile.su/dl/great_video.mp4";',
+        },
+    }
+    ctx = _ctx(text_map=text_map, post_map=post_map)
+    out = await Cyberfile().resolve("https://cyberfile.su/AbCd123", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://files.cyberfile.su/dl/great_video.mp4"
+    assert out[0].dedup_key == "cyberfile:WhAtEvEr123"
+
+
+async def test_gofile_folder():
+    from forum_orchestrator.resolvers.gofile import GoFile
+    text_map = {
+        "https://gofile.io/dist/js/global.js": 'wt: "abc123token"',
+    }
+    post_map = {
+        "https://api.gofile.io/accounts": {"data": {"token": "mytok"}},
+    }
+    json_map = {
+        "https://api.gofile.io/contents/FOLDER1?wt=abc123token&cache=true": {
+            "status": "ok",
+            "data": {
+                "children": {
+                    "f1": {"type": "file", "id": "f1", "name": "a.mp4",
+                            "link": "https://store.gofile.io/dl/a.mp4"},
+                    "f2": {"type": "file", "id": "f2", "name": "b.jpg",
+                            "link": "https://store.gofile.io/dl/b.jpg"},
+                },
+            },
+        },
+    }
+    ctx = _ctx(text_map=text_map, json_map=json_map, post_map=post_map)
+    out = await GoFile().resolve("https://gofile.io/d/FOLDER1", ctx)
+    assert {r.filename for r in out} == {"a.mp4", "b.jpg"}
+    assert all(r.dedup_key.startswith("gofile:") for r in out)
+
+
+async def test_anonfiles_tombstone():
+    from forum_orchestrator.errors import DeadLink
+    from forum_orchestrator.resolvers.anonfiles import AnonFiles
+    with pytest.raises(DeadLink):
+        await AnonFiles().resolve("https://anonfiles.com/abc", _ctx())

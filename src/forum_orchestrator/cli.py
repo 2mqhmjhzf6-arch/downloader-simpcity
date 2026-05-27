@@ -31,6 +31,17 @@ def _pages(raw: Optional[str]) -> Optional[tuple[int, int]]:
     return n, n
 
 
+def _normalize_only(raw: str) -> str:
+    raw = (raw or "both").strip().lower()
+    if raw in ("video", "videos", "v"):
+        return "video"
+    if raw in ("photo", "photos", "image", "images", "p", "i"):
+        return "photo"
+    if raw in ("both", "all", "any", ""):
+        return "both"
+    raise typer.BadParameter(f"--only must be one of: videos, photos, both (got {raw!r})")
+
+
 def _posts(raw: Optional[str]) -> Optional[set[str]]:
     if not raw:
         return None
@@ -56,6 +67,11 @@ def download(
     no_curl_cffi: bool = typer.Option(
         False, help="Disable curl-cffi (TLS-impersonating) requests"
     ),
+    only: str = typer.Option(
+        "both", "--only",
+        help="Filter resource kinds: 'videos', 'photos', or 'both' (default).",
+    ),
+    quiet: bool = typer.Option(False, "--quiet", help="Suppress progress bars"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
     """Scrape a XenForo thread and download all resolvable media."""
@@ -63,6 +79,7 @@ def download(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    only_norm = _normalize_only(only)
     cfg = Config(
         out_dir=out.resolve(),
         cookies_file=cookies,
@@ -75,6 +92,8 @@ def download(
         concurrency=concurrency,
         dry_run=dry_run,
         use_curl_cffi=not no_curl_cffi,
+        only_kind=only_norm,
+        quiet=quiet,
     )
     orc = Orchestrator(cfg)
     asyncio.run(orc.run(url))
