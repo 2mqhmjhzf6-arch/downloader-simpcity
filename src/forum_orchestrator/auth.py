@@ -23,6 +23,13 @@ def load_cookiejar(
     jar = http.cookiejar.CookieJar()
 
     if cookies_file is not None:
+        if not Path(cookies_file).exists():
+            raise FileNotFoundError(
+                f"--cookies path does not exist: {cookies_file}\n"
+                "Export one with a browser extension (Firefox 'cookies.txt' or "
+                "Chrome 'Get cookies.txt LOCALLY'), or use --cookies-from-browser "
+                "<firefox|chrome|edge|brave> to read your live browser profile."
+            )
         moz = http.cookiejar.MozillaCookieJar(str(cookies_file))
         moz.load(ignore_discard=True, ignore_expires=True)
         for c in moz:

@@ -9,13 +9,13 @@ from ..models import Resource
 from . import _chevereto
 from .base import Resolver, ResolveContext, register
 
-_HOST = r"pixl\.(?:is|li|cr|cx|to)"
+_HOST = r"(?:[a-z]\d?\.)?pixl\.(?:is|li|cr|cx|to)"
 
 
 @register
 class Pixl(Resolver):
     name = "pixl"
-    patterns = [rf"{_HOST}/img/", rf"{_HOST}/image/"]
+    patterns = [rf"{_HOST}/"]
     album_patterns = [rf"{_HOST}/(?:a|album)/"]
 
     async def resolve(self, url: str, ctx: ResolveContext) -> list[Resource]:

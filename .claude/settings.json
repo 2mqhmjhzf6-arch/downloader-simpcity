@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m forum_orchestrator --help)",
+      "Bash(python -m forum_orchestrator list-resolvers)",
+      "Bash(python -m forum_orchestrator check-resolvers)"
+    ]
+  }
+}

@@ -6,22 +6,23 @@ Cloudflare interstitial and the CDN base for any given file rotates between a
 handful of subdomains — see the userscript's ``xfpdBunkrFilterBases`` for the
 full list. Our approach:
 
-1. For an album URL, fetch the page and pull every internal link that looks
-   like a single-file URL (``/v/`` or ``/f/``).
-2. For a single-file URL, fetch the page, grab the human-readable filename
-   from the ``<title>`` and the canonical CDN ``download`` link from the
-   ``link[rel=preload]`` / ``<source>`` / ``<a class=ic-download>`` element,
-   whichever is present.
-3. POST to ``/api/vs`` with the slug if the file URL is masked (some bunkr
-   pages no longer expose the CDN link directly).
-
-The actual download happens later in the orchestrator — we only return the
-resolved direct URL + filename here.
+1. For an album URL, fetch the page and pull every file from the Next.js
+   ``__NEXT_DATA__`` JSON blob (modern bunkr) or from ``<a href>`` grid links
+   (older markup) as a fallback. Recurse into ``_resolve_single`` per file.
+2. For a single-file URL, fetch the page and read the file metadata from
+   ``__NEXT_DATA__`` (``name`` + ``cdn``/``url``). Fall back to assorted CSS
+   selectors if the JSON shape ever changes again.
+3. For CDN-direct URLs that bypass the file page entirely, route them back
+   through ``bunkr.cr/v/<basename>`` (or ``/f/``) so we get a real file URL +
+   correct ``Referer``. The naked CDN response is usually a Cloudflare
+   interstitial that we'd otherwise save to disk as ``.mp4``.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from selectolax.parser import HTMLParser
@@ -31,11 +32,14 @@ from .base import Resolver, ResolveContext, basename_from_url, guess_kind, regis
 
 _BUNKR_TLDS = r"(ac|ax|black|cat|ci|cr|fi|is|media|nu|pk|ph|ps|red|ru|se|si|site|sk|ws|su|org)"
 
-# Album grid item: <a href="https://bunkr.cr/v/foo.mp4">  (or /f/ for files)
+_BUNKR_HOME = "https://bunkr.cr"
+
 _GRID_LINK = re.compile(
     rf"href=[\"'](https?://(?:[\w-]+\.)?bunkr+\.{_BUNKR_TLDS}/(?:v|f|i)/[^\"'>]+)",
     re.IGNORECASE,
 )
+
+_VIDEO_EXTS = re.compile(r"\.(mp4|m4v|mov|webm|mkv|avi|ts)(?:\?|$)", re.IGNORECASE)
 
 
 @register
@@ -51,24 +55,44 @@ class Bunkr(Resolver):
     async def resolve(self, url: str, ctx: ResolveContext) -> list[Resource]:
         if "/a/" in url:
             return await self._resolve_album(url, ctx)
-        # CDN-direct URL: just hand it back.
-        if re.search(r"(cdn|i-pizza|big-taco|b-cdn|gigachad-cdn|bunkr-cache)\.", url, re.I):
+        # CDN-direct URL: route back through bunkr.cr's file page so we get
+        # a real CDN link + correct Referer (the naked CDN URL returns an
+        # interstitial unless we hit it via the file page).
+        if re.search(r"(?:cdn\d*|i-pizza\d*|big-taco[\w-]*|b-cdn|gigachad-cdn|bunkr-cache)\.", url, re.I):
+            base = basename_from_url(url)
+            route = "v" if _VIDEO_EXTS.search(base) else "f"
+            for page_route in (route, "v" if route == "f" else "f"):
+                page_url = f"{_BUNKR_HOME}/{page_route}/{base}"
+                try:
+                    items = await self._resolve_single(page_url, ctx)
+                except Exception:
+                    items = []
+                if items:
+                    return items
+            # Last-resort: return the CDN URL with a bunkr.cr Referer so at
+            # least the streamer doesn't send the CDN as its own origin.
             return [Resource(
                 url=url,
-                filename=basename_from_url(url),
+                filename=base,
                 kind=guess_kind(url),
-                referer=_origin(url),
+                referer=f"{_BUNKR_HOME}/",
                 dedup_key=url,
             )]
         return await self._resolve_single(url, ctx)
 
     async def _resolve_album(self, url: str, ctx: ResolveContext) -> list[Resource]:
         html = await ctx.http.get_text(url, referer=url)
-        # Album title -> not actually used for filenames (each file has its own).
+        slugs = _album_slugs_from_next_data(html)
+        if not slugs:
+            # Fallback: scrape anchors directly (older / non-Next.js bunkr).
+            for m in _GRID_LINK.finditer(html):
+                slugs.append(m.group(1))
         seen: set[str] = set()
         items: list[Resource] = []
-        for m in _GRID_LINK.finditer(html):
-            link = m.group(1)
+        for link in slugs:
+            if not link.startswith("http"):
+                # Slug-only -> assume video first, fall back to file page.
+                link = f"{_BUNKR_HOME}/v/{link}"
             if link in seen:
                 continue
             seen.add(link)
@@ -82,31 +106,45 @@ class Bunkr(Resolver):
         html = await ctx.http.get_text(url, referer=url)
         dom = HTMLParser(html)
 
-        # 1. Human filename from page title (`foo.mp4 | Bunkr`)
         title = ""
         if (t := dom.css_first("title")) is not None:
             title = (t.text() or "").strip()
         title = re.sub(r"\s*\|\s*Bunkr\s*$", "", title, flags=re.I).strip()
 
-        # 2. Canonical CDN download URL — try a handful of selectors.
         direct: str | None = None
-        for sel in (
-            'a.ic-download-01-svg, a[class*="ic-download"]',
-            'a.btn-main[href*="get.bunkr"]',
-            'source[src]',
-            'video[src]',
-            'img.max-h-full[src]',
-            'link[rel="preload"][as="image"][href]',
-        ):
-            node = dom.css_first(sel)
-            if node is None:
-                continue
-            cand = node.attributes.get("href") or node.attributes.get("src")
-            if cand:
-                direct = urljoin(url, cand)
-                break
+        filename: str | None = None
 
-        # 3. Fallback: scrape JSON blob shipped in <script id="__NEXT_DATA__">
+        data = _next_data(dom)
+        if data is not None:
+            file_obj = _find_file_object(data)
+            if file_obj is not None:
+                filename = (file_obj.get("name") or file_obj.get("filename") or "").strip() or None
+                cdn = (file_obj.get("cdn") or "").strip()
+                raw_url = (file_obj.get("url") or file_obj.get("src") or "").strip()
+                if raw_url.startswith("http"):
+                    direct = raw_url
+                elif cdn and filename:
+                    direct = cdn.rstrip("/") + "/" + filename.lstrip("/")
+                elif cdn:
+                    direct = cdn
+
+        if direct is None:
+            for sel in (
+                'a.ic-download-01-svg, a[class*="ic-download"]',
+                'a.btn-main[href*="get.bunkr"]',
+                'source[src]',
+                'video[src]',
+                'img.max-h-full[src]',
+                'link[rel="preload"][as="image"][href]',
+            ):
+                node = dom.css_first(sel)
+                if node is None:
+                    continue
+                cand = node.attributes.get("href") or node.attributes.get("src")
+                if cand:
+                    direct = urljoin(url, cand)
+                    break
+
         if direct is None:
             blob = dom.css_first('script#__NEXT_DATA__')
             if blob and blob.text():
@@ -117,13 +155,67 @@ class Bunkr(Resolver):
         if direct is None:
             return []
 
+        name = filename or title or basename_from_url(direct)
+        kind = guess_kind(direct)
+        if kind == Kind.OTHER:
+            kind = guess_kind(name)
+
         return [Resource(
             url=direct,
-            filename=title or basename_from_url(direct),
-            kind=guess_kind(direct) if guess_kind(direct) != Kind.OTHER else guess_kind(title),
-            referer=url,
-            dedup_key=re.sub(r"^https?://[^/]+", "", direct),  # path-only dedup across CDN bases
+            filename=name,
+            kind=kind,
+            referer=f"{_BUNKR_HOME}/",
+            dedup_key=re.sub(r"^https?://[^/]+", "", direct),
         )]
+
+
+def _next_data(dom: HTMLParser) -> dict[str, Any] | None:
+    node = dom.css_first('script#__NEXT_DATA__')
+    if node is None or not node.text():
+        return None
+    try:
+        return json.loads(node.text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _find_file_object(data: Any) -> dict[str, Any] | None:
+    """Walk the JSON looking for an object with a ``name`` and a CDN-ish key."""
+    stack = [data]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            keys = cur.keys()
+            if "name" in keys and any(k in keys for k in ("cdn", "url", "src", "mediafiles")):
+                return cur
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return None
+
+
+def _album_slugs_from_next_data(html: str) -> list[str]:
+    dom = HTMLParser(html)
+    data = _next_data(dom)
+    if data is None:
+        return []
+    slugs: list[str] = []
+    stack = [data]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            slug = cur.get("slug") or cur.get("id")
+            name = cur.get("name") or ""
+            # Only treat as a file if there's a file-shaped attribute alongside.
+            looks_like_file = any(k in cur for k in ("size", "type", "cdn", "url", "src"))
+            if looks_like_file and isinstance(slug, str) and slug and isinstance(name, str) and name:
+                route = "v" if _VIDEO_EXTS.search(name) else "f"
+                slugs.append(f"{_BUNKR_HOME}/{route}/{slug}")
+            else:
+                stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return slugs
 
 
 def _origin(url: str) -> str:

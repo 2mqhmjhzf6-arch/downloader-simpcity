@@ -7,6 +7,8 @@ from forum_orchestrator.forum.xenforo import (
     _extract_posts,
     _extract_title,
     _extract_total_pages,
+    _is_ui_asset,
+    _unwrap_redirect,
     parse_thread_id,
 )
 from selectolax.parser import HTMLParser
@@ -29,6 +31,34 @@ def test_extract_title_pages_posts():
     assert posts[0].posted_at is not None
     assert posts[0].posted_at.date().isoformat() == "2025-11-14"
     assert posts[0].post_number == 1
+
+
+def test_unwrap_redirect_decodes_base64_envelope():
+    src = "https://simpcity.cr/redirect/?to=aHR0cHM6Ly9nb2ZpbGUuaW8vZC9WYmtGYmU&e=1&m=b64"
+    assert _unwrap_redirect(src) == "https://gofile.io/d/VbkFbe"
+
+
+def test_unwrap_redirect_passthrough_for_non_simpcity():
+    src = "https://example.com/redirect/?to=aHR0cHM6Ly9nb2ZpbGUuaW8vZC9WYmtGYmU"
+    assert _unwrap_redirect(src) == src
+
+
+def test_unwrap_redirect_passthrough_when_no_to_param():
+    src = "https://simpcity.cr/redirect/?foo=bar"
+    assert _unwrap_redirect(src) == src
+
+
+def test_unwrap_redirect_passthrough_for_invalid_base64():
+    src = "https://simpcity.cr/redirect/?to=!!not-base64!!"
+    assert _unwrap_redirect(src) == src
+
+
+def test_ui_asset_blocks_bunkr_dash_and_twemoji():
+    assert _is_ui_asset("https://dash.bunkr.pk/assets/img/icon.svg")
+    assert _is_ui_asset("https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/1f459.svg")
+    assert _is_ui_asset("https://simpcity.cr/styles/foo/sprite.svg")
+    assert not _is_ui_asset("https://bunkr.cr/v/some-video.mp4")
+    assert not _is_ui_asset("https://jpg5.su/img/foo.jpg")
 
 
 def test_extract_links_finds_all_known_hosts():

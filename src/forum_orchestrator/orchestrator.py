@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -40,7 +41,14 @@ from .tracking import (
     write_failed_downloads,
     write_unsupported_hosts,
 )
-from .ui import console, progress_bar
+from .ui import console, progress_count_bar
+
+
+_ALBUM_PATH_RX = re.compile(r"/(?:a|album|folder)/", re.IGNORECASE)
+
+
+def _looks_like_album(url: str) -> bool:
+    return bool(_ALBUM_PATH_RX.search(url))
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +122,7 @@ class Orchestrator:
         sem = asyncio.Semaphore(self.cfg.concurrency)
         resolved: list[tuple[Post, Resource]] = []
 
-        with progress_bar(disable=disable_ui) as progress:
+        with progress_count_bar(disable=disable_ui) as progress:
             resolve_task = progress.add_task(
                 "resolving", host="all", total=len(unresolved),
             )
@@ -142,6 +150,13 @@ class Orchestrator:
                         return
                     finally:
                         progress.advance(resolve_task, 1)
+                    if not items and not _looks_like_album(link.url):
+                        state.record_failure(
+                            thread.thread_id,
+                            link.url,
+                            f"resolver '{cls.name}' returned no resources",
+                        )
+                        return
                     for r in items:
                         if _resource_excluded(r, self.cfg):
                             continue
