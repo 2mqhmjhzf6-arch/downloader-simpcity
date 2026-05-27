@@ -285,11 +285,20 @@ async def test_saint_single():
 async def test_turbo_single():
     from forum_orchestrator.resolvers.turbo import Turbo
     html = load_fixture("turbo_single.html")
-    ctx = _ctx({"https://turbo.cr/v/sample": html})
+    ctx = _ctx(
+        text_map={"https://turbo.cr/embed/sample": html},
+        json_map={
+            "https://turbo.cr/api/sign?v=sample": {
+                "success": True,
+                "url": "https://cdn.turbo.cr/v/sample.mp4?exp=9999999999&sig=abc",
+            },
+        },
+    )
     out = await Turbo().resolve("https://turbo.cr/v/sample", ctx)
     assert len(out) == 1
     assert out[0].kind == Kind.VIDEO
-    assert out[0].url == "https://cdn.turbo.cr/v/sample.mp4"
+    assert out[0].url.startswith("https://cdn.turbo.cr/v/sample.mp4?exp=")
+    assert out[0].filename == "Sample Video.mp4"
 
 
 async def test_filester_single():
@@ -462,17 +471,23 @@ async def test_bunkr_album_via_next_data():
 # ---------------------------------------------------------------------------
 
 
-async def test_turbo_embed_inline_json():
+async def test_turbo_embed_falls_back_to_url_vvid():
+    """When the page omits `const vvid = ...`, derive vvid from the URL."""
     from forum_orchestrator.resolvers.turbo import Turbo
     html = (
-        '<html><head><title>gg5WwANtZ9B | Turbo</title></head>'
-        '<body><script>'
-        'var sources = [{ "src": "https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4",'
-        ' "type": "video/mp4" }];'
-        '</script></body></html>'
+        '<html><head><title>clip.mp4</title></head>'
+        '<body><video id="main-video"></video></body></html>'
     )
-    ctx = _ctx({"https://turbo.cr/embed/gg5WwANtZ9B": html})
+    ctx = _ctx(
+        text_map={"https://turbo.cr/embed/gg5WwANtZ9B": html},
+        json_map={
+            "https://turbo.cr/api/sign?v=gg5WwANtZ9B": {
+                "success": True,
+                "url": "https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4?exp=1",
+            },
+        },
+    )
     out = await Turbo().resolve("https://turbo.cr/embed/gg5WwANtZ9B", ctx)
     assert len(out) == 1
-    assert out[0].url == "https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4"
+    assert out[0].url.startswith("https://cdn.turbo.cr/videos/gg5WwANtZ9B.mp4")
     assert out[0].kind == Kind.VIDEO

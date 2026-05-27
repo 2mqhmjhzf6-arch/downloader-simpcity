@@ -1,21 +1,26 @@
 """Bunkr (.cr / .ax / .black / ...).
 
-Bunkr serves albums at ``/a/<slug>`` and single files at ``/v/<slug>`` (videos)
-or ``/i/<slug>``/CDN subdomains (images). The site is permanently behind a
-Cloudflare interstitial and the CDN base for any given file rotates between a
-handful of subdomains — see the userscript's ``xfpdBunkrFilterBases`` for the
-full list. Our approach:
+Bunkr serves albums at ``/a/<slug>`` and single files at ``/f/<slug>`` or
+``/v/<slug>``. The site is permanently behind Cloudflare and the CDN base
+for any given file rotates between many subdomains. Modern (server-rendered)
+bunkr does NOT use Next.js anymore — album pages ship a grid of HTML cards
+with ``<a href="/f/<slug>">``; single-file pages ship the CDN URL in an
+``<img class="max-h-full">``, ``<source>``, ``<video>``, or a "Download"
+button. Older Next.js markup is still handled as a fallback.
 
-1. For an album URL, fetch the page and pull every file from the Next.js
-   ``__NEXT_DATA__`` JSON blob (modern bunkr) or from ``<a href>`` grid links
-   (older markup) as a fallback. Recurse into ``_resolve_single`` per file.
-2. For a single-file URL, fetch the page and read the file metadata from
-   ``__NEXT_DATA__`` (``name`` + ``cdn``/``url``). Fall back to assorted CSS
-   selectors if the JSON shape ever changes again.
-3. For CDN-direct URLs that bypass the file page entirely, route them back
-   through ``bunkr.cr/v/<basename>`` (or ``/f/``) so we get a real file URL +
-   correct ``Referer``. The naked CDN response is usually a Cloudflare
-   interstitial that we'd otherwise save to disk as ``.mp4``.
+Strategy:
+
+1. **Album** (``/a/<slug>``): scrape ``<a href="/f/.">`` from the grid; if
+   none found, fall back to the Next.js JSON walker.
+2. **Single file** (``/f/<slug>`` or ``/v/<slug>``): try CSS selectors for
+   the download/source nodes; fall back to Next.js JSON; final fallback is
+   a regex pass over the full HTML for any ``cdn*.bunkr.*`` /
+   ``*.scdn.st/.../<file>`` URL.
+3. **CDN-direct** (``cdn*.bunkr.*/<basename>``): the naked CDN URL returns
+   a Cloudflare interstitial. Route back through the file page; the slug
+   is the trailing ``-XXXXX`` segment before the extension. If neither
+   ``/f/<slug>`` nor ``/v/<slug>`` works, return [] so the URL lands in
+   ``failed_downloads.txt`` instead of being saved as a corrupt .mp4.
 """
 
 from __future__ import annotations
@@ -41,6 +46,16 @@ _GRID_LINK = re.compile(
 
 _VIDEO_EXTS = re.compile(r"\.(mp4|m4v|mov|webm|mkv|avi|ts)(?:\?|$)", re.IGNORECASE)
 
+# Trailing slug from a bunkr CDN filename, e.g. "84-373_Pandora-MQ0959lw.mp4"
+# -> "MQ0959lw". 8-15 alphanumeric chars after a dash, before the extension.
+_CDN_SLUG_TAIL = re.compile(r"-([A-Za-z0-9_-]{6,20})(?=\.[A-Za-z0-9]{2,5}(?:\?|$))")
+
+# Bunkr's many CDN hostnames + a generic match for "static.scdn.st" media.
+_CDN_HOSTS_RE = re.compile(
+    r"(?:cdn\d*|i-pizza\d*|big-taco[\w-]*|b-cdn|gigachad-cdn|bunkr-cache)\.",
+    re.IGNORECASE,
+)
+
 
 @register
 class Bunkr(Resolver):
@@ -58,36 +73,57 @@ class Bunkr(Resolver):
         # CDN-direct URL: route back through bunkr.cr's file page so we get
         # a real CDN link + correct Referer (the naked CDN URL returns an
         # interstitial unless we hit it via the file page).
-        if re.search(r"(?:cdn\d*|i-pizza\d*|big-taco[\w-]*|b-cdn|gigachad-cdn|bunkr-cache)\.", url, re.I):
+        if _CDN_HOSTS_RE.search(url):
             base = basename_from_url(url)
-            route = "v" if _VIDEO_EXTS.search(base) else "f"
-            for page_route in (route, "v" if route == "f" else "f"):
-                page_url = f"{_BUNKR_HOME}/{page_route}/{base}"
-                try:
-                    items = await self._resolve_single(page_url, ctx)
-                except Exception:
-                    items = []
-                if items:
-                    return items
-            # Naked CDN URL with no working file page: hitting it directly
-            # returns the Cloudflare interstitial as text/html, which would
-            # land on disk as a corrupt .mp4. Fail loudly instead so the URL
-            # ends up in failed_downloads.txt for manual retry.
+            # The bunkr file-page slug is the trailing segment after the
+            # last "-" (before the extension): "foo-bar-MQ0959lw.mp4" -> "MQ0959lw".
+            slug_m = _CDN_SLUG_TAIL.search(base)
+            candidates: list[str] = []
+            if slug_m:
+                candidates.append(slug_m.group(1))
+            # Last-resort: the whole basename (old bunkr behavior).
+            candidates.append(base)
+            route_pref = "v" if _VIDEO_EXTS.search(base) else "f"
+            for slug in candidates:
+                for page_route in (route_pref, "v" if route_pref == "f" else "f"):
+                    page_url = f"{_BUNKR_HOME}/{page_route}/{slug}"
+                    try:
+                        items = await self._resolve_single(page_url, ctx)
+                    except Exception:
+                        items = []
+                    if items:
+                        return items
+            # Couldn't find a working file page: fail loudly so the URL ends
+            # up in failed_downloads.txt instead of saving the CF interstitial
+            # as a corrupt .mp4.
             return []
         return await self._resolve_single(url, ctx)
 
     async def _resolve_album(self, url: str, ctx: ResolveContext) -> list[Resource]:
         html = await ctx.http.get_text(url, referer=url)
-        slugs = _album_slugs_from_next_data(html)
+        dom = HTMLParser(html)
+
+        # New (server-rendered) bunkr: <a href="/f/<slug>"> inside each card.
+        slugs: list[str] = []
+        for a in dom.css('a[href*="/f/"], a[href*="/v/"], a[href*="/i/"]'):
+            href = a.attributes.get("href")
+            if not href or href.startswith(("#", "javascript:")):
+                continue
+            slugs.append(urljoin(url, href))
+
+        # Fallback 1: regex over raw HTML for absolute bunkr file URLs.
         if not slugs:
-            # Fallback: scrape anchors directly (older / non-Next.js bunkr).
             for m in _GRID_LINK.finditer(html):
                 slugs.append(m.group(1))
+
+        # Fallback 2: legacy Next.js JSON.
+        if not slugs:
+            slugs.extend(_album_slugs_from_next_data(html))
+
         seen: set[str] = set()
         items: list[Resource] = []
         for link in slugs:
             if not link.startswith("http"):
-                # Slug-only -> assume video first, fall back to file page.
                 link = f"{_BUNKR_HOME}/v/{link}"
             if link in seen:
                 continue
@@ -110,6 +146,7 @@ class Bunkr(Resolver):
         direct: str | None = None
         filename: str | None = None
 
+        # 1. Legacy Next.js JSON.
         data = _next_data(dom)
         if data is not None:
             file_obj = _find_file_object(data)
@@ -124,34 +161,53 @@ class Bunkr(Resolver):
                 elif cdn:
                     direct = cdn
 
+        # 2. CSS selectors covering current + older markup.
         if direct is None:
             for sel in (
-                'a.ic-download-01-svg, a[class*="ic-download"]',
-                'a.btn-main[href*="get.bunkr"]',
+                'a[href*="get.bunkr"]',
+                'a.btn-main[href*="cdn"]',
+                'a.ic-download-01-svg[href]',
+                'a[class*="ic-download"][href]',
+                'a[download][href]',
                 'source[src]',
                 'video[src]',
                 'img.max-h-full[src]',
+                'img[class*="grid-images_box-img"][src]',
                 'link[rel="preload"][as="image"][href]',
             ):
                 node = dom.css_first(sel)
                 if node is None:
                     continue
                 cand = node.attributes.get("href") or node.attributes.get("src")
-                if cand:
-                    direct = urljoin(url, cand)
-                    break
+                if not cand:
+                    continue
+                cand = urljoin(url, cand)
+                # Skip obvious thumbnails — they're tiny PNGs, not the original.
+                if "/thumbs/" in cand or cand.endswith("-thumb.jpg"):
+                    continue
+                direct = cand
+                break
 
+        # 3. Regex pass over raw HTML for any plausible CDN URL.
         if direct is None:
-            blob = dom.css_first('script#__NEXT_DATA__')
-            if blob and blob.text():
-                m = re.search(r'"(?:cdn|url|src)":"(https?://[^"]+)"', blob.text())
+            for rx in (
+                r'"(?:cdn|url|src|file)":"(https?:\\?/\\?/[^"]+)"',
+                r'(https?://(?:[\w-]+\.)?(?:scdn\.st|bunkr[\w.-]+|b-cdn[\w.-]*)/[^\s"\'<>]+\.[A-Za-z0-9]{2,5}(?:\?[^\s"\'<>]*)?)',
+            ):
+                m = re.search(rx, html, re.IGNORECASE)
                 if m:
-                    direct = m.group(1).encode().decode("unicode_escape")
+                    cand = m.group(1).encode().decode("unicode_escape")
+                    if "/thumbs/" in cand:
+                        continue
+                    direct = cand
+                    break
 
         if direct is None:
             return []
 
         name = filename or title or basename_from_url(direct)
+        # Strip junk from the title-derived name (Bunkr appends " | Bunkr").
+        name = re.sub(r"\s*\|\s*Bunkr\s*$", "", name, flags=re.I).strip()
         kind = guess_kind(direct)
         if kind == Kind.OTHER:
             kind = guess_kind(name)
@@ -202,7 +258,6 @@ def _album_slugs_from_next_data(html: str) -> list[str]:
         if isinstance(cur, dict):
             slug = cur.get("slug") or cur.get("id")
             name = cur.get("name") or ""
-            # Only treat as a file if there's a file-shaped attribute alongside.
             looks_like_file = any(k in cur for k in ("size", "type", "cdn", "url", "src"))
             if looks_like_file and isinstance(slug, str) and slug and isinstance(name, str) and name:
                 route = "v" if _VIDEO_EXTS.search(name) else "f"

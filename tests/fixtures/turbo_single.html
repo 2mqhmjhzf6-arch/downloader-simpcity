@@ -1,7 +1,10 @@
 <!doctype html>
-<html><head><title>Sample Video | Turbo</title></head>
+<html><head><title>Sample Video.mp4</title></head>
 <body>
-  <video controls>
-    <source src="https://cdn.turbo.cr/v/sample.mp4" type="video/mp4">
-  </video>
+  <div class="watermark"><a href="/v/sample">turbo.cr</a></div>
+  <video id="main-video" controls></video>
+  <script>
+    const vvid = "sample";
+    fetch('/api/sign?v=' + vvid);
+  </script>
 </body></html>
