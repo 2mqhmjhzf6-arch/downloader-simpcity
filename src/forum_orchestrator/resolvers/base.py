@@ -33,6 +33,8 @@ class ResolveContext:
     # Optional hint about the post that contained this URL — some resolvers use
     # the surrounding HTML to recover a human filename.
     post_html: Optional[str] = None
+    # GoFile account token. Resolver uses it instead of the anonymous one.
+    gofile_token: Optional[str] = None
 
 
 class Resolver(Protocol):

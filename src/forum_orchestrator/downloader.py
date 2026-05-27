@@ -17,10 +17,11 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from .errors import DeadLink, TransientError
 from .http_client import HttpClient
-from .models import Resource
+from .models import Kind, Resource
 from .naming import unique_path
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ async def download_resource(
     tmp = target_dir / f".{uuid.uuid4().hex}.{filename}.part"
     h = hashlib.sha256()
     size = 0
+    decryptor = _make_decryptor(resource)
     try:
         async with http.stream("GET", resource.url, referer=resource.referer,
                                headers=resource.headers) as r:
@@ -66,10 +68,21 @@ async def download_resource(
                 raise DeadLink(f"HTTP {r.status_code}")
             if r.status_code >= 400:
                 raise TransientError(f"HTTP {r.status_code}")
+            # HTML-as-media guard. When a CDN returns an interstitial / login
+            # page in place of the expected file, the response is
+            # text/html(+meta), not the binary type we asked for. Writing
+            # those bytes corrupts the .mp4 / .jpg on disk. Bail before we
+            # touch the file.
+            if _looks_like_html(r) and resource.kind in (Kind.VIDEO, Kind.IMAGE):
+                raise TransientError(
+                    f"server returned HTML for {resource.kind.value} URL"
+                )
             with open(tmp, "wb") as f:
                 async for chunk in r.aiter_bytes(chunk_size=1 << 15):
                     if not chunk:
                         continue
+                    if decryptor is not None:
+                        chunk = decryptor.decrypt(chunk)
                     f.write(chunk)
                     h.update(chunk)
                     size += len(chunk)
@@ -85,8 +98,67 @@ async def download_resource(
     # "foo (2).mov" rather than racing on the same path.
     async with _lock_for(target_dir):
         target = unique_path(target_dir, filename)
-        os.replace(tmp, target)
+        await _replace_with_retry(tmp, target)
     return DownloadResult(path=target, size=size, sha256=h.hexdigest())
+
+
+def _looks_like_html(response) -> bool:
+    headers = getattr(response, "headers", None) or {}
+    try:
+        ct = headers.get("content-type") or headers.get("Content-Type") or ""
+    except AttributeError:
+        # Some adapters expose headers as a list of tuples or a Mapping with
+        # only __getitem__; fall through.
+        try:
+            ct = headers["content-type"]
+        except Exception:
+            ct = ""
+    return str(ct).split(";", 1)[0].strip().lower() in {"text/html", "application/xhtml+xml"}
+
+
+async def _replace_with_retry(src: Path, dst: Path) -> None:
+    """``os.replace`` with a tiny backoff for Windows AV/indexer races.
+
+    On Windows a freshly-closed file can briefly be held by an antivirus
+    scanner or the search indexer, causing ``PermissionError [WinError 32]``.
+    Retry a few times rather than losing the download.
+    """
+    delays = (0.0, 0.2, 0.5, 1.0)
+    last_exc: Optional[Exception] = None
+    for d in delays:
+        if d:
+            await asyncio.sleep(d)
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:
+            last_exc = e
+            continue
+    assert last_exc is not None
+    raise last_exc
+
+
+def _make_decryptor(resource: Resource):
+    """Build an AES-CTR decryptor when the resource carries a stream key.
+
+    Only Mega.nz uses this today. The key/IV format follows Mega's
+    convention: 16-byte key, 8-byte nonce in the high half of the IV with the
+    low half acting as the block counter.
+    """
+    key = resource.stream_decrypt_key
+    iv = resource.stream_decrypt_iv
+    if not key or not iv:
+        return None
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util import Counter
+    except ImportError as e:  # pragma: no cover - optional dep
+        raise TransientError(
+            "pycryptodome required for encrypted streams (pip install pycryptodome)"
+        ) from e
+    nonce = iv[:8]
+    counter = Counter.new(64, prefix=nonce, initial_value=0)
+    return AES.new(key, AES.MODE_CTR, counter=counter)
 
 
 def _silent_unlink(p: Path) -> None:

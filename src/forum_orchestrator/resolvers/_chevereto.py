@@ -24,21 +24,38 @@ from .base import ResolveContext, basename_from_url, guess_kind
 def _strip_thumb(u: str) -> str:
     """``foo.md.jpg`` / ``foo.th.jpg`` -> ``foo.jpg``. Preserves query string."""
     base, sep, query = u.partition("?")
-    stripped = re.sub(r"\.(md|th)\.(jpe?g|png|gif|webp)$", r".\2", base, flags=re.I)
+    stripped = re.sub(r"\.(md|th)\.(jpe?g|png|gif|webp|avif)$", r".\2", base, flags=re.I)
     return stripped + (sep + query if sep else "")
+
+
+# Chevereto v4 dropped the legacy `a[data-action="download-image"]` hook on
+# most installs and serves the viewer as ``<img id="image-viewer-container-img">``
+# or ``<img class="image-viewer-image">``. Older templates (pixl.is, jpg.church)
+# still expose the data-action link; the v4 markup is checked first so we
+# don't accidentally hit a stale fallback.
+_IMAGE_PAGE_SELECTORS = (
+    'a[data-action="download-image"][href]',
+    'img#image-viewer-container-img[src]',
+    'img.image-viewer-image[src]',
+    'a.image-link[href*="/images/"]',
+    'meta[property="og:image"]',
+    'link[rel="image_src"]',
+)
 
 
 async def resolve_image_page(url: str, ctx: ResolveContext) -> list[Resource]:
     html = await ctx.http.get_text(url, referer=url)
     dom = HTMLParser(html)
     direct = None
-    for sel in ('a[data-action="download-image"][href]',
-                'meta[property="og:image"]',
-                'link[rel="image_src"]'):
+    for sel in _IMAGE_PAGE_SELECTORS:
         n = dom.css_first(sel)
         if not n:
             continue
-        direct = n.attributes.get("href") or n.attributes.get("content")
+        direct = (
+            n.attributes.get("href")
+            or n.attributes.get("src")
+            or n.attributes.get("content")
+        )
         if direct:
             break
     if not direct:
@@ -90,9 +107,19 @@ async def resolve_album(url: str, ctx: ResolveContext) -> list[Resource]:
             html = await _unlock_if_needed(url, html, ctx)
         dom = HTMLParser(html)
         found = 0
-        for a in dom.css('a.image-container[href], a.--media[href]'):
-            href = a.attributes.get("href")
-            if href and href not in seen:
+        # Multiple Chevereto themes / versions ship different markup for the
+        # "card -> image page" link. Try them all and dedup by href.
+        for sel in (
+            'a.image-container[href]',
+            'a.--media[href]',
+            'div.list-item-image a[href*="/img/"]',
+            'a.image-link[href*="/img/"]',
+            'a[href*="/img/"][data-content-page]',
+        ):
+            for a in dom.css(sel):
+                href = a.attributes.get("href")
+                if not href or href in seen:
+                    continue
                 seen.add(href)
                 found += 1
                 out.extend(await resolve_image_page(urljoin(url, href), ctx))

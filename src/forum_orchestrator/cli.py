@@ -73,6 +73,16 @@ def download(
     ),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress progress bars"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
+    password: Optional[list[str]] = typer.Option(
+        None, "--password", "-p",
+        help="Password to try on protected albums (gofile, chevereto, mega). "
+             "Repeatable. Per-post spoiler passwords are auto-extracted too.",
+    ),
+    gofile_token: Optional[str] = typer.Option(
+        None, "--gofile-token", envvar="FMO_GOFILE_TOKEN",
+        help="GoFile account token (skips anonymous handshake; needed for "
+             "albums that require a logged-in account).",
+    ),
 ) -> None:
     """Scrape a XenForo thread and download all resolvable media."""
     logging.basicConfig(
@@ -94,6 +104,8 @@ def download(
         use_curl_cffi=not no_curl_cffi,
         only_kind=only_norm,
         quiet=quiet,
+        passwords=list(password or []),
+        gofile_token=gofile_token,
     )
     orc = Orchestrator(cfg)
     asyncio.run(orc.run(url))

@@ -18,6 +18,7 @@ from . import (  # noqa: F401
     ibb,
     redgifs,
     gofile,
+    mega,
     saint2,
     turbo,
     cyberfile,

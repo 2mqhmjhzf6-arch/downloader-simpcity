@@ -56,6 +56,32 @@ _CDN_HOSTS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The bunkr "get" interstitial — a fake direct link that actually serves a
+# token-gated HTML page, not the file. We need to follow it and re-extract.
+_GET_INTERSTITIAL_RE = re.compile(
+    rf"^https?://(?:[\w-]+\.)?get\.bunkr+r?\.{_BUNKR_TLDS}/",
+    re.IGNORECASE,
+)
+
+
+def _is_real_cdn(url: str) -> bool:
+    """True unless ``url`` is the ``get.bunkrr`` interstitial or an HTML page.
+
+    Used to reject candidate "direct" URLs that would write a Cloudflare /
+    token-gated HTML body to disk under a media filename.
+    """
+    if _GET_INTERSTITIAL_RE.match(url):
+        return False
+    path = urlparse(url).path.lower()
+    if path.endswith((".html", ".htm", ".php")):
+        return False
+    # Bunkr's own file-page paths look like ``/v/<slug>`` or ``/f/<slug>``;
+    # those are HTML pages, not direct downloads.
+    host = urlparse(url).netloc.lower()
+    if "bunkr" in host and re.search(r"^/(v|f|i|a)/", path):
+        return False
+    return True
+
 
 @register
 class Bunkr(Resolver):
@@ -205,6 +231,26 @@ class Bunkr(Resolver):
         if direct is None:
             return []
 
+        # If the candidate URL points at the "get.bunkrr" interstitial, follow
+        # it once and re-extract from THAT page. Returning the interstitial as
+        # a direct download writes a token-gated HTML page to disk with the
+        # file's extension.
+        if _GET_INTERSTITIAL_RE.match(direct):
+            try:
+                followed = await self._follow_get_interstitial(direct, ctx)
+            except Exception:
+                followed = None
+            if not followed or not _is_real_cdn(followed):
+                return []
+            direct = followed
+
+        # Reject any final URL that obviously isn't a media file (.html,
+        # extension-less, etc.). Better to fail loudly than to save corruption.
+        if not _is_real_cdn(direct):
+            return []
+        if direct.split("?", 1)[0].lower().endswith((".html", ".htm", ".php")):
+            return []
+
         name = filename or title or basename_from_url(direct)
         # Strip junk from the title-derived name (Bunkr appends " | Bunkr").
         name = re.sub(r"\s*\|\s*Bunkr\s*$", "", name, flags=re.I).strip()
@@ -219,6 +265,38 @@ class Bunkr(Resolver):
             referer=f"{_BUNKR_HOME}/",
             dedup_key=re.sub(r"^https?://[^/]+", "", direct),
         )]
+
+    async def _follow_get_interstitial(self, url: str, ctx: ResolveContext) -> str | None:
+        """Resolve a ``get.bunkrr.<tld>/file/<id>`` URL into the real CDN link.
+
+        The interstitial page either embeds a `<source>` / `<video>` pointing
+        at the CDN, exposes a `download_url` field in inlined JSON, or just
+        redirects via JS. We accept any of those.
+        """
+        html = await ctx.http.get_text(url, referer=f"{_BUNKR_HOME}/")
+        dom = HTMLParser(html)
+        for sel in (
+            'source[src]', 'video[src]', 'a[download][href]',
+            'a[href*="cdn"]', 'a[href*="scdn.st"]',
+        ):
+            n = dom.css_first(sel)
+            if n is None:
+                continue
+            cand = n.attributes.get("href") or n.attributes.get("src")
+            if cand:
+                cand = urljoin(url, cand)
+                if _is_real_cdn(cand):
+                    return cand
+        for rx in (
+            r'"(?:download_url|cdn|url|src|file)":"(https?:\\?/\\?/[^"]+)"',
+            r'(https?://(?:[\w-]+\.)?(?:scdn\.st|bunkr[\w.-]+|b-cdn[\w.-]*)/[^\s"\'<>]+\.[A-Za-z0-9]{2,5}(?:\?[^\s"\'<>]*)?)',
+        ):
+            m = re.search(rx, html, re.IGNORECASE)
+            if m:
+                cand = m.group(1).encode().decode("unicode_escape")
+                if _is_real_cdn(cand):
+                    return cand
+        return None
 
 
 def _next_data(dom: HTMLParser) -> dict[str, Any] | None:

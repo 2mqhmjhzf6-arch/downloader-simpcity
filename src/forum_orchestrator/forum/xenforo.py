@@ -36,6 +36,14 @@ _UI_ASSET = re.compile(
     re.IGNORECASE,
 )
 
+# Matches inline password hints like "pw: hunter2", "password = foo",
+# "pass : bar". Captures everything up to the next whitespace.
+_PW_INLINE_RX = re.compile(
+    r"(?i)\b(?:pw|pass|passwd|password|key)\s*[:=]\s*(\S+)"
+)
+# Strip leading boilerplate ("pw:", "p:", "key:") off a captured token.
+_PW_TRIM_RX = re.compile(r"^(?:pw|p|pass|password|key)\s*[:=]\s*", re.IGNORECASE)
+
 
 def _unwrap_redirect(url: str) -> str:
     """Decode `simpcity.cr/redirect/?to=<base64>&...` envelopes."""
@@ -185,7 +193,57 @@ def _extract_posts(html: str, page_url: str) -> Iterable[Post]:
             posted_at=posted_at.astimezone(timezone.utc) if posted_at else None,
             raw_html=body_html,
             page_url=page_url,
+            passwords=_extract_passwords(body) if body is not None else [],
         )
+
+
+def _extract_passwords(body_node) -> list[str]:
+    """Pull password/key hints out of a post body.
+
+    XenForo spoilers come in two flavors:
+      * Block:  <div class="bbCodeBlock--spoiler"><div class="bbCodeBlock-content">PW</div></div>
+      * Inline: <span class="bbCodeInlineSpoiler">PW</span>
+    Also catches plain "pw: hunter2" / "password = foo" inline in post text.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _push(tok: str) -> None:
+        tok = (tok or "").strip()
+        tok = _PW_TRIM_RX.sub("", tok).strip().strip(":,;")
+        if not tok or tok in seen:
+            return
+        seen.add(tok)
+        out.append(tok)
+
+    for sel in (
+        '.bbCodeBlock--spoiler .bbCodeBlock-content',
+        '.bbCodeSpoiler-content',
+        '.bbCodeInlineSpoiler',
+        'span[data-s9e-mediaembed-spoiler]',
+    ):
+        for n in body_node.css(sel):
+            txt = (n.text() or "").strip()
+            if not txt:
+                continue
+            # If the spoiler body itself contains an inline "pw:" hint, prefer
+            # the captured token; otherwise treat the whole spoiler as the pw.
+            ms = list(_PW_INLINE_RX.finditer(txt))
+            if ms:
+                for m in ms:
+                    _push(m.group(1))
+            else:
+                # Spoilers are often just the bare password. Limit to one line.
+                first_line = txt.splitlines()[0].strip()
+                if first_line and len(first_line) <= 128:
+                    _push(first_line)
+
+    # Inline matches across the whole post body text.
+    full_text = body_node.text(separator=" ") if body_node is not None else ""
+    for m in _PW_INLINE_RX.finditer(full_text):
+        _push(m.group(1))
+
+    return out
 
 
 def _dedup_preserve(seq: Iterable[str]) -> list[str]:

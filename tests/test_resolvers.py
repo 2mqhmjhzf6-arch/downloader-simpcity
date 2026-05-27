@@ -225,6 +225,11 @@ def test_new_resolvers_routed():
         "https://filester.gg/f/zzz":         "filester",
         "https://gofile.io/d/AbCd":          "gofile",
         "https://anonfiles.com/abc":         "anonfiles",
+        "https://mega.nz/file/abcd#KEY":     "mega",
+        "https://mega.nz/folder/abcd#KEY":   "mega",
+        "https://mega.nz/#!abcd!KEY":        "mega",
+        "https://mega.nz/#F!abcd!KEY":       "mega",
+        "https://mega.nz/#P!encryptedblob":  "mega",
     }
     for url, expected in cases.items():
         cls = find_resolver(url)
@@ -354,6 +359,140 @@ async def test_gofile_folder():
     assert all(r.dedup_key.startswith("gofile:") for r in out)
 
 
+async def test_mega_single_file_decodes_filename_and_sets_aes_stream():
+    """End-to-end mega file resolve with a mocked CS response. We assert the
+    filename came out of the encrypted attrs and that the Resource carries
+    AES-CTR params for the downloader."""
+    from Crypto.Cipher import AES
+    from forum_orchestrator.resolvers.mega import (
+        _b64e, _file_aes_params,
+    )
+    from forum_orchestrator.resolvers.mega import Mega
+
+    # Build a deterministic 32-byte file key, derive AES key, then encrypt a
+    # synthetic attr blob ({"n":"sample.mp4"}) so the resolver can decode it.
+    file_key_32 = bytes(range(32))
+    aes_key, iv = _file_aes_params(file_key_32)
+    import json as _json
+    plain = b"MEGA" + _json.dumps({"n": "sample.mp4"}).encode()
+    plain += b"\x00" * (-len(plain) % 16)
+    encrypted_attrs = AES.new(aes_key, AES.MODE_CBC, b"\x00" * 16).encrypt(plain)
+
+    # Fake response: list with one dict containing the .g download URL
+    # and the base64-encoded encrypted attributes.
+    fake_response = type("R", (), {
+        "json": lambda self: [{
+            "g": "https://gfs1.mega.io/CIPHERTEXT", "s": 12345,
+            "at": _b64e(encrypted_attrs),
+        }],
+    })()
+
+    from unittest.mock import AsyncMock
+    http = AsyncMock()
+    http.request = AsyncMock(return_value=fake_response)
+    ctx = ResolveContext(http=http)
+
+    url = f"https://mega.nz/file/HANDLE#{_b64e(file_key_32)}"
+    out = await Mega().resolve(url, ctx)
+    assert len(out) == 1
+    r = out[0]
+    assert r.filename == "sample.mp4"
+    assert r.url == "https://gfs1.mega.io/CIPHERTEXT"
+    assert r.stream_decrypt_key == aes_key
+    assert r.stream_decrypt_iv == iv
+    assert r.dedup_key == "mega:file:HANDLE"
+
+
+async def test_mega_password_link_no_match_is_dead():
+    from forum_orchestrator.errors import DeadLink
+    from forum_orchestrator.resolvers.mega import Mega
+    ctx = _ctx()
+    ctx.passwords = ["nope"]
+    with pytest.raises(DeadLink, match="password"):
+        await Mega().resolve("https://mega.nz/#P!aGVsbG93b3JsZGZha2VibG9i", ctx)
+
+
+async def test_gofile_uses_ctx_token_and_skips_accounts():
+    """When ``ResolveContext.gofile_token`` is set we must NOT POST to
+    /accounts; the supplied token is used for the contents call."""
+    from forum_orchestrator.resolvers.gofile import GoFile
+    text_map = {"https://gofile.io/dist/js/global.js": 'wt: "wtKEY1234"'}
+    json_map = {
+        "https://api.gofile.io/contents/F1?wt=wtKEY1234&cache=true": {
+            "status": "ok",
+            "data": {
+                "children": {
+                    "x": {"type": "file", "id": "x", "name": "a.png",
+                          "link": "https://store/a.png"},
+                },
+            },
+        },
+    }
+    ctx = _ctx(text_map=text_map, json_map=json_map)
+    ctx.gofile_token = "USER-TOKEN"
+    out = await GoFile().resolve("https://gofile.io/d/F1", ctx)
+    assert len(out) == 1
+    # The fake http.post_json would have returned {} (no /accounts entry in
+    # post_map), so if the resolver had hit it we'd have crashed.
+    ctx.http.post_json.assert_not_called()
+
+
+async def test_gofile_password_protected_retries_with_sha256():
+    """A password-required folder retries with sha256(password) until one
+    succeeds. We assert dummy fallback behaviour: with no matching pw,
+    the resolver raises DeadLink."""
+    import hashlib
+
+    from forum_orchestrator.errors import DeadLink
+    from forum_orchestrator.resolvers.gofile import GoFile
+
+    pw_hash = hashlib.sha256(b"hunter2").hexdigest()
+    text_map = {"https://gofile.io/dist/js/global.js": 'wt: "wtKEY1234"'}
+    json_map = {
+        "https://api.gofile.io/contents/F2?wt=wtKEY1234&cache=true": {
+            "status": "ok",
+            "data": {"passwordStatus": "passwordRequired"},
+        },
+        f"https://api.gofile.io/contents/F2?wt=wtKEY1234&cache=true&password={pw_hash}": {
+            "status": "ok",
+            "data": {
+                "children": {
+                    "k": {"type": "file", "id": "k", "name": "ok.mp4",
+                          "link": "https://store/ok.mp4"},
+                },
+            },
+        },
+    }
+    post_map = {"https://api.gofile.io/accounts": {"data": {"token": "anon"}}}
+    ctx = _ctx(text_map=text_map, json_map=json_map, post_map=post_map)
+    ctx.passwords = ["wrong", "hunter2"]
+    out = await GoFile().resolve("https://gofile.io/d/F2", ctx)
+    assert len(out) == 1
+    assert out[0].filename == "ok.mp4"
+
+    # No matching password -> DeadLink.
+    ctx2 = _ctx(text_map=text_map, json_map=json_map, post_map=post_map)
+    ctx2.passwords = ["nope"]
+    with pytest.raises(DeadLink):
+        await GoFile().resolve("https://gofile.io/d/F2", ctx2)
+
+
+async def test_gofile_notpremium_is_deadlink():
+    from forum_orchestrator.errors import DeadLink
+    from forum_orchestrator.resolvers.gofile import GoFile
+    text_map = {"https://gofile.io/dist/js/global.js": 'wt: "wtKEY1234"'}
+    json_map = {
+        "https://api.gofile.io/contents/F3?wt=wtKEY1234&cache=true": {
+            "status": "error-notPremium",
+            "data": {},
+        },
+    }
+    post_map = {"https://api.gofile.io/accounts": {"data": {"token": "anon"}}}
+    ctx = _ctx(text_map=text_map, json_map=json_map, post_map=post_map)
+    with pytest.raises(DeadLink, match="premium"):
+        await GoFile().resolve("https://gofile.io/d/F3", ctx)
+
+
 async def test_anonfiles_tombstone():
     from forum_orchestrator.errors import DeadLink
     from forum_orchestrator.resolvers.anonfiles import AnonFiles
@@ -382,6 +521,45 @@ async def test_chevereto_strip_preserves_query():
     assert _strip_thumb("https://x/foo.png") == "https://x/foo.png"
 
 
+async def test_chevereto_v4_image_page_via_viewer_img():
+    """Chevereto v4 dropped the legacy `a[data-action="download-image"]`
+    on some installs; we must fall back to the viewer <img>."""
+    html = (
+        '<html><body>'
+        '<img id="image-viewer-container-img" src="https://jpg6.su/i/2026/03/abcd.jpg">'
+        '</body></html>'
+    )
+    ctx = _ctx({"https://jpg6.su/img/abcd.foo": html})
+    out = await JpgSu().resolve("https://jpg6.su/img/abcd.foo", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://jpg6.su/i/2026/03/abcd.jpg"
+
+
+async def test_chevereto_v4_album_via_list_item_image():
+    """Album pages on the v4 markup use ``div.list-item-image a[href*='/img/']``
+    instead of the old ``a.image-container``."""
+    album = (
+        '<html><body>'
+        '<div class="list-item-image"><a href="https://jpg6.su/img/pic1.foo">x</a></div>'
+        '<div class="list-item-image"><a href="https://jpg6.su/img/pic2.bar">y</a></div>'
+        '</body></html>'
+    )
+    image_html = (
+        '<html><body>'
+        '<img class="image-viewer-image" src="https://jpg6.su/i/full.jpg">'
+        '</body></html>'
+    )
+    ctx = _ctx({
+        "https://jpg6.su/a/myalbum": album,
+        "https://jpg6.su/img/pic1.foo": image_html,
+        "https://jpg6.su/img/pic2.foo?page=2": "",
+        "https://jpg6.su/img/pic2.bar": image_html,
+    })
+    out = await JpgSu().resolve("https://jpg6.su/a/myalbum", ctx)
+    assert len(out) == 2
+    assert all(r.url == "https://jpg6.su/i/full.jpg" for r in out)
+
+
 # ---------------------------------------------------------------------------
 # bunkr — CDN-direct routes via file-page, __NEXT_DATA__ parsing
 # ---------------------------------------------------------------------------
@@ -403,6 +581,44 @@ async def test_bunkr_cdn_direct_routes_to_file_page():
     assert len(out) == 1
     assert out[0].url == "https://cdn7.bunkr.ru/1-341_Pandora-xqlYb9K0.mp4"
     assert out[0].referer == "https://bunkr.cr/"
+
+
+async def test_bunkr_rejects_get_interstitial_when_follow_fails():
+    """If the resolver's first candidate is the ``get.bunkrr`` interstitial
+    and we cannot extract a real CDN URL from it, return [] rather than
+    saving the HTML body to disk under a media extension."""
+    file_page = (
+        '<html><head><title>movie.mp4 | Bunkr</title></head>'
+        '<body><a href="https://get.bunkrr.su/file/abc123">DL</a></body></html>'
+    )
+    interstitial = '<html><body>just a token page, no media</body></html>'
+    ctx = _ctx({
+        "https://bunkr.cr/v/movie.mp4": file_page,
+        "https://get.bunkrr.su/file/abc123": interstitial,
+    })
+    out = await Bunkr().resolve("https://bunkr.cr/v/movie.mp4", ctx)
+    assert out == []
+
+
+async def test_bunkr_follows_get_interstitial_to_real_cdn():
+    """When the interstitial DOES expose the CDN URL, follow it and emit
+    the real direct link."""
+    file_page = (
+        '<html><head><title>movie.mp4 | Bunkr</title></head>'
+        '<body><a href="https://get.bunkrr.su/file/abc123">DL</a></body></html>'
+    )
+    interstitial = (
+        '<html><body>'
+        '<a download href="https://cdn4.bunkr.ru/movie.mp4">go</a>'
+        '</body></html>'
+    )
+    ctx = _ctx({
+        "https://bunkr.cr/v/movie.mp4": file_page,
+        "https://get.bunkrr.su/file/abc123": interstitial,
+    })
+    out = await Bunkr().resolve("https://bunkr.cr/v/movie.mp4", ctx)
+    assert len(out) == 1
+    assert out[0].url == "https://cdn4.bunkr.ru/movie.mp4"
 
 
 async def test_bunkr_single_via_next_data():

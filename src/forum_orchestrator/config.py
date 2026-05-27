@@ -29,3 +29,8 @@ class Config:
     passwords: list[str] = field(default_factory=list)
     only_kind: Literal["video", "photo", "both"] = "both"
     quiet: bool = False
+    # GoFile authenticated account token. When set, the gofile resolver skips
+    # the anonymous /accounts handshake and uses this token for every
+    # /contents call — needed for albums that require a real account
+    # (error-notPremium).
+    gofile_token: Optional[str] = None

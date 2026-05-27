@@ -130,12 +130,19 @@ class Orchestrator:
             async def _resolve_one(link: PostLink, cls) -> None:
                 async with sem:
                     resolver = cls()
+                    # Merge CLI-supplied passwords with whatever the post body
+                    # advertised in spoilers / "pw: ..." hints. Preserve order,
+                    # dedup.
+                    merged_pws = list(dict.fromkeys(
+                        [*self.cfg.passwords, *link.post.passwords]
+                    ))
                     ctx = ResolveContext(
                         http=http,
                         max_height=self.cfg.max_height,
                         exclude_4k=self.cfg.exclude_4k,
-                        passwords=self.cfg.passwords,
+                        passwords=merged_pws,
                         post_html=link.post.raw_html,
+                        gofile_token=self.cfg.gofile_token,
                     )
                     try:
                         items = await resolver.resolve(link.url, ctx)

@@ -61,6 +61,41 @@ def test_ui_asset_blocks_bunkr_dash_and_twemoji():
     assert not _is_ui_asset("https://jpg5.su/img/foo.jpg")
 
 
+def test_extract_passwords_from_spoiler_and_inline():
+    html = (
+        '<article class="message" data-content="post-1" id="js-post-1">'
+        '  <div class="message-attribution-opposite"><a>#1</a></div>'
+        '  <div class="bbWrapper">'
+        '    <a href="https://mega.nz/file/xyz#abc">mega</a>'
+        '    <div class="bbCodeBlock--spoiler"><div class="bbCodeBlock-content">'
+        '      hunter2'
+        '    </div></div>'
+        '    <span class="bbCodeInlineSpoiler">inline-secret</span>'
+        '    plain text pw: foo-bar123 and also password = qux'
+        '  </div>'
+        '</article>'
+    )
+    posts = list(_extract_posts(html, "https://simpcity.cr/threads/x.1/page-1"))
+    assert len(posts) == 1
+    pws = posts[0].passwords
+    # Order preserved, dedup applied. All four hints must be captured.
+    assert "hunter2" in pws
+    assert "inline-secret" in pws
+    assert "foo-bar123" in pws
+    assert "qux" in pws
+
+
+def test_extract_passwords_empty_when_no_hints():
+    html = (
+        '<article class="message" data-content="post-7" id="js-post-7">'
+        '  <div class="message-attribution-opposite"><a>#1</a></div>'
+        '  <div class="bbWrapper">just a link <a href="https://x/y.jpg">img</a></div>'
+        '</article>'
+    )
+    posts = list(_extract_posts(html, "https://simpcity.cr/threads/x.1/page-1"))
+    assert posts[0].passwords == []
+
+
 def test_extract_links_finds_all_known_hosts():
     html = load_fixture("xenforo_thread_p1.html")
     posts = list(_extract_posts(html, "https://simpcity.cr/threads/x.1/page-1"))

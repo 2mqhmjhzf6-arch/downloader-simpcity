@@ -19,6 +19,9 @@ class Post:
     posted_at: Optional[datetime]
     raw_html: str
     page_url: str
+    # Passwords/keys mentioned in spoilers or inline ("pw: hunter2"). Empty if
+    # nothing was found.
+    passwords: list[str] = field(default_factory=list)
 
     @property
     def post_date(self) -> Optional[date]:
@@ -46,6 +49,11 @@ class Resource:
     height: Optional[int] = None
     # Resolver-supplied stable id used for dedup when URLs differ but file is same.
     dedup_key: Optional[str] = None
+    # If set, the downloader streams ciphertext through AES-CTR with this
+    # 16-byte key + 16-byte IV before writing/hashing. Mega.nz needs this; no
+    # other resolver currently uses it.
+    stream_decrypt_key: Optional[bytes] = None
+    stream_decrypt_iv: Optional[bytes] = None
 
 
 @dataclass(slots=True)

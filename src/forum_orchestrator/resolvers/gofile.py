@@ -21,6 +21,7 @@ folders are recursed.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Optional
 from urllib.parse import urljoin
@@ -46,8 +47,11 @@ class GoFile(Resolver):
     patterns: list[str] = []
     album_patterns = [r"gofile\.io/d/"]
 
-    _wt: Optional[str] = None
-    _token: Optional[str] = None
+    def __init__(self) -> None:
+        # Per-instance to avoid leaking a stale token across runs that share
+        # the registered class.
+        self._wt: Optional[str] = None
+        self._token: Optional[str] = None
 
     async def resolve(self, url: str, ctx: ResolveContext) -> list[Resource]:
         m = re.search(r"gofile\.io/d/([A-Za-z0-9]+)", url)
@@ -104,6 +108,10 @@ class GoFile(Resolver):
         return self._wt
 
     async def _account_token(self, ctx: ResolveContext) -> str:
+        if ctx.gofile_token:
+            # Caller supplied a real account token; use it directly.
+            self._token = ctx.gofile_token
+            return ctx.gofile_token
         if self._token:
             return self._token
         try:
@@ -123,22 +131,48 @@ class GoFile(Resolver):
         self, content_id: str, wt: str, token: str,
         ctx: ResolveContext, *, root_url: str,
     ) -> list[Resource]:
-        api = f"{_API}/contents/{content_id}?wt={wt}&cache=true"
+        api_base = f"{_API}/contents/{content_id}?wt={wt}&cache=true"
         try:
             data = await ctx.http.get_json(
-                api,
+                api_base,
                 referer="https://gofile.io/",
                 headers={"Authorization": f"Bearer {token}"},
             )
         except Exception as e:
             raise ResolverError(f"gofile: list failed for {content_id}: {e}") from e
 
-        if data.get("status") != "ok":
-            raise DeadLink(f"gofile: {data.get('status', 'unknown')}")
+        status = data.get("status", "unknown")
+        if status == "error-notPremium":
+            raise DeadLink(
+                "gofile: premium account required (set --gofile-token)"
+            )
+        if status != "ok":
+            raise DeadLink(f"gofile: {status}")
         node = data.get("data") or {}
         if node.get("passwordStatus") == "passwordRequired":
-            # Password-protected folders aren't supported here yet.
-            raise DeadLink("gofile: password-protected folder")
+            # Try each known password (post-spoiler + CLI) in turn. Gofile
+            # expects sha256(pw) hex.
+            unlocked = None
+            for pw in ctx.passwords:
+                pw_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+                try:
+                    retry = await ctx.http.get_json(
+                        f"{api_base}&password={pw_hash}",
+                        referer="https://gofile.io/",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                except Exception:
+                    continue
+                rnode = retry.get("data") or {}
+                if (
+                    retry.get("status") == "ok"
+                    and rnode.get("passwordStatus") != "passwordRequired"
+                ):
+                    unlocked = rnode
+                    break
+            if unlocked is None:
+                raise DeadLink("gofile: password-protected folder")
+            node = unlocked
         children = node.get("children") or {}
         out: list[Resource] = []
         for child in children.values():
