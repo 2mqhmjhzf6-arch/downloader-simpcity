@@ -69,15 +69,11 @@ class Bunkr(Resolver):
                     items = []
                 if items:
                     return items
-            # Last-resort: return the CDN URL with a bunkr.cr Referer so at
-            # least the streamer doesn't send the CDN as its own origin.
-            return [Resource(
-                url=url,
-                filename=base,
-                kind=guess_kind(url),
-                referer=f"{_BUNKR_HOME}/",
-                dedup_key=url,
-            )]
+            # Naked CDN URL with no working file page: hitting it directly
+            # returns the Cloudflare interstitial as text/html, which would
+            # land on disk as a corrupt .mp4. Fail loudly instead so the URL
+            # ends up in failed_downloads.txt for manual retry.
+            return []
         return await self._resolve_single(url, ctx)
 
     async def _resolve_album(self, url: str, ctx: ResolveContext) -> list[Resource]:

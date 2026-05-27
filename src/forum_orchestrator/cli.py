@@ -108,6 +108,52 @@ def list_resolvers() -> None:
                       f"patterns={len(cls.patterns)} albums={len(cls.album_patterns)}")
 
 
+@app.command("debug-fetch")
+def debug_fetch(
+    url: str = typer.Argument(..., help="URL to fetch with the same client fmo uses"),
+    cookies: Optional[Path] = typer.Option(None, help="Optional Netscape cookies.txt"),
+    no_curl_cffi: bool = typer.Option(
+        False, help="Disable curl-cffi (TLS-impersonating) requests"
+    ),
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Write body to file"),
+) -> None:
+    """Fetch a URL with the same HTTP stack the resolvers use and dump the body.
+
+    Useful for capturing real HTML from Cloudflare-fronted hosts (bunkr,
+    turbo, gofile) so a resolver can be fixed against the current markup.
+    """
+    from http.cookiejar import MozillaCookieJar
+    from .config import Config
+    from .http_client import HttpClient
+
+    cj = None
+    if cookies:
+        cj = MozillaCookieJar(str(cookies))
+        cj.load(ignore_discard=True, ignore_expires=True)
+
+    cfg = Config(out_dir=Path("."), use_curl_cffi=not no_curl_cffi)
+
+    async def go() -> None:
+        client = HttpClient(
+            user_agent=cfg.user_agent,
+            cookies=cj,
+            timeout_s=cfg.timeout_s,
+            retries=cfg.retries,
+            use_curl_cffi=cfg.use_curl_cffi,
+        )
+        try:
+            body = await client.get_text(url, referer=url)
+        finally:
+            await client.aclose()
+        if out:
+            out.write_text(body, encoding="utf-8")
+            console.print(f"wrote {len(body):,} bytes to {out}")
+        else:
+            sys.stdout.write(body)
+
+    asyncio.run(go())
+
+
 @app.command("check-resolvers")
 def check_resolvers(
     live: bool = typer.Option(False, "--live", help="Actually hit the network"),

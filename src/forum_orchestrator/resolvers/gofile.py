@@ -6,9 +6,14 @@ GoFile content lives behind a JSON API:
 2. ``GET https://api.gofile.io/contents/<id>?wt=<wt>&cache=true``
    with ``Authorization: Bearer <token>``           -> folder/file listing
 
-``wt`` (the "website token") is a static string embedded in their main
-``alljs.js``. It changes occasionally so we scrape it on demand and cache it
-on the resolver instance.
+``wt`` (the "website token") is a static string embedded in their JS. The
+bundle URL changes periodically (``alljs.js`` -> ``global.js`` -> hashed
+``_next`` chunks), so we discover it dynamically:
+
+* fetch the user-facing ``/d/<id>`` page,
+* scan inline scripts for ``wt: "..."`` or ``appdata.wt = "..."``,
+* otherwise fetch every ``<script src>`` referenced on the page and look
+  for the same pattern.
 
 Output: every leaf-file ``link`` is returned as a :class:`Resource`. Sub-
 folders are recursed.
@@ -18,14 +23,21 @@ from __future__ import annotations
 
 import re
 from typing import Optional
+from urllib.parse import urljoin
 
 from ..errors import DeadLink, ResolverError
 from ..models import Resource
 from .base import Resolver, ResolveContext, guess_kind, register
 
 _API = "https://api.gofile.io"
-_JS = "https://gofile.io/dist/js/global.js"
-_FALLBACK_WT = "4fd6sg89d7s6"  # observed default; replaced live if we can scrape one
+_HOME = "https://gofile.io/"
+_WT_RE = re.compile(r'(?:appdata\s*\.\s*)?wt\s*[:=]\s*["\']([A-Za-z0-9]{8,})["\']')
+# Fallback bundle paths to try if the page HTML doesn't reveal one.
+_JS_FALLBACKS = (
+    "https://gofile.io/dist/js/global.js",
+    "https://gofile.io/dist/js/alljs.js",
+)
+_FALLBACK_WT = "4fd6sg89d7s6"  # last-known-good; works until they rotate
 
 
 @register
@@ -43,22 +55,51 @@ class GoFile(Resolver):
             return []
         content_id = m.group(1)
 
-        wt = await self._website_token(ctx)
+        wt = await self._website_token(ctx, content_id)
         token = await self._account_token(ctx)
 
         return await self._collect(content_id, wt, token, ctx, root_url=url)
 
-    async def _website_token(self, ctx: ResolveContext) -> str:
+    async def _website_token(self, ctx: ResolveContext, content_id: str) -> str:
         if self._wt:
             return self._wt
+        page_url = f"https://gofile.io/d/{content_id}"
+        # 1. Page HTML often inlines `wt` directly.
+        page = ""
         try:
-            js = await ctx.http.get_text(_JS, referer="https://gofile.io/")
-            m = re.search(r'wt\s*[:=]\s*["\']([A-Za-z0-9]+)["\']', js)
+            page = await ctx.http.get_text(page_url, referer=_HOME)
+            m = _WT_RE.search(page)
             if m:
                 self._wt = m.group(1)
                 return self._wt
         except Exception:
             pass
+        # 2. Each <script src> referenced from the page is a candidate bundle.
+        seen: set[str] = set()
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', page):
+            full = urljoin(page_url, src)
+            if full in seen:
+                continue
+            seen.add(full)
+            try:
+                js = await ctx.http.get_text(full, referer=page_url)
+            except Exception:
+                continue
+            m = _WT_RE.search(js)
+            if m:
+                self._wt = m.group(1)
+                return self._wt
+        # 3. Hard-coded fallback bundle paths.
+        for js_url in _JS_FALLBACKS:
+            try:
+                js = await ctx.http.get_text(js_url, referer=_HOME)
+            except Exception:
+                continue
+            m = _WT_RE.search(js)
+            if m:
+                self._wt = m.group(1)
+                return self._wt
+        # 4. Last-known-good static string; will 401 if rotated.
         self._wt = _FALLBACK_WT
         return self._wt
 
